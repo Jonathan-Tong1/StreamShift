@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.Timestamp;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -170,7 +171,6 @@ public class DatabaseUpdateService {
 
     /**
      * Handle UPSERT operation (INSERT ON CONFLICT UPDATE)
-     * Useful for handling out-of-order events
      */
     public void upsert(String tableName, Map<String, Object> data, List<String> conflictColumns) {
         if (data == null || data.isEmpty()) {
@@ -224,10 +224,48 @@ public class DatabaseUpdateService {
 
     /**
      * Convert values to appropriate types for PostgreSQL
+     * Handles Debezium's timestamp formats (epoch microseconds and milliseconds)
      */
     private Object convertValue(Object value) {
         if (value == null) {
             return null;
+        }
+
+        // Handle timestamp values from Debezium
+        if (value instanceof Long) {
+            Long longValue = (Long) value;
+
+            // Check if this looks like a timestamp
+            if (longValue > 0) {
+                try {
+                    // If it's larger than milliseconds range, treat as microseconds
+                    if (longValue > 9999999999999L) { // More than 13 digits = microseconds
+                        // Convert microseconds to milliseconds
+                        return Timestamp.from(Instant.ofEpochMilli(longValue / 1000));
+                    }
+                    // Otherwise treat as milliseconds
+                    else if (longValue > 946684800000L) { // After year 2000 in milliseconds
+                        return Timestamp.from(Instant.ofEpochMilli(longValue));
+                    }
+                } catch (Exception e) {
+                    logger.warn("Failed to convert timestamp {}: {}", longValue, e.getMessage());
+                    return value;
+                }
+            }
+        }
+
+        // Handle integer timestamps
+        if (value instanceof Integer) {
+            Integer intValue = (Integer) value;
+            // Check if this could be epoch seconds (not milliseconds)
+            if (intValue > 946684800 && intValue < 4102444800L) { // Jan 1, 2000 to Jan 1, 2100 in seconds
+                try {
+                    return Timestamp.from(Instant.ofEpochSecond(intValue));
+                } catch (Exception e) {
+                    logger.warn("Failed to convert timestamp {}: {}", intValue, e.getMessage());
+                    return value;
+                }
+            }
         }
 
         // Handle timestamp strings from Debezium
@@ -239,7 +277,7 @@ public class DatabaseUpdateService {
                 try {
                     return Timestamp.valueOf(LocalDateTime.parse(strValue.substring(0, 19)));
                 } catch (Exception e) {
-                    // If parsing fails, return as string
+                    logger.warn("Failed to parse timestamp string {}: {}", strValue, e.getMessage());
                     return strValue;
                 }
             }
