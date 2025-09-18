@@ -1,51 +1,64 @@
 #!/bin/bash
-# Fixed setup script for StreamShift MVP
+# Setup script for StreamShift
 
 set -e
 
-echo "StreamShift MVP Setup"
-echo "===================="
+echo "StreamShift Setup"
+echo "=============================="
 
-function wait_for_port() {
+function wait_for_service() {
     local port=$1
     local service=$2
+    local max_attempts=${3:-30}
+
     echo "Waiting for $service on port $port..."
 
-    for i in {1..60}; do
+    for i in $(seq 1 $max_attempts); do
         if nc -z localhost $port 2>/dev/null; then
-            echo "$service is ready!"
+            echo "✓ $service is ready!"
             return 0
         fi
         sleep 2
         echo -n "."
     done
 
-    echo "ERROR: $service failed to start"
+    echo "✗ $service failed to start on port $port"
     return 1
 }
 
-function wait_for_debezium() {
-    echo "Waiting for Debezium to be fully ready..."
+function check_kafka_ready() {
+    echo "Checking if Kafka is fully ready..."
 
     for i in {1..30}; do
-        if curl -s localhost:8083/connectors >/dev/null 2>&1; then
-            echo "Debezium is responding!"
+        if docker exec streamshift-kafka kafka-topics --bootstrap-server localhost:9092 --list >/dev/null 2>&1; then
+            echo "✓ Kafka is accepting connections!"
             return 0
         fi
         sleep 3
         echo -n "."
     done
 
-    echo "ERROR: Debezium not responding"
+    echo "✗ Kafka not responding to topic commands"
     return 1
 }
 
 function register_connector() {
     echo "Registering Debezium connector..."
 
-    # Extra wait to ensure Debezium is really ready
-    sleep 15
+    # Wait for Debezium to be ready
+    for i in {1..20}; do
+        if curl -s localhost:8083/connectors >/dev/null 2>&1; then
+            echo "✓ Debezium is responding!"
+            break
+        fi
+        sleep 5
+        echo -n "."
+    done
 
+    # Give it a bit more time
+    sleep 10
+
+    # Register the connector
     curl -X POST -H "Content-Type:application/json" localhost:8083/connectors/ -d '{
       "name": "inventory-connector",
       "config": {
@@ -56,7 +69,7 @@ function register_connector() {
         "database.user": "postgres",
         "database.password": "postgres",
         "database.dbname": "inventory",
-        "database.server.name": "dbserver1",
+        "topic.prefix": "dbserver1",
         "schema.include.list": "inventory",
         "table.include.list": "inventory.customers",
         "plugin.name": "pgoutput",
@@ -65,27 +78,22 @@ function register_connector() {
     }'
 
     echo ""
-    echo "Connector registration attempted!"
-
-    # Verify registration
-    sleep 5
-    echo "Checking connector status..."
-    curl -s localhost:8083/connectors/inventory-connector/status | grep -q "RUNNING" && echo "Connector is RUNNING!" || echo "Connector may need more time to start"
+    echo "Connector registration completed!"
 }
 
-function check_status() {
-    echo "Checking system status..."
+function show_status() {
+    echo "=== System Status ==="
 
-    echo "Connectors:"
-    curl -s localhost:8083/connectors || echo "Debezium not responding"
+    echo "Docker containers:"
+    docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+
+    echo ""
+    echo "Debezium connectors:"
+    curl -s localhost:8083/connectors 2>/dev/null || echo "Debezium not responding"
 
     echo ""
     echo "Kafka topics:"
-    docker exec streamshift-kafka kafka-topics --bootstrap-server localhost:9092 --list 2>/dev/null | grep dbserver1 || echo "No Debezium topics yet"
-
-    echo ""
-    echo "Database test:"
-    docker exec streamshift-postgres-source psql -U postgres -d inventory -c "SELECT COUNT(*) FROM inventory.customers;" 2>/dev/null || echo "Database connection failed"
+    docker exec streamshift-kafka kafka-topics --bootstrap-server localhost:9092 --list 2>/dev/null | head -10
 }
 
 function test_changes() {
@@ -96,57 +104,69 @@ function test_changes() {
         VALUES ('Test', 'User', 'test@example.com');
     "
 
-    sleep 3
+    echo "Inserted test record. Check your StreamShift logs!"
+}
 
-    docker exec streamshift-postgres-source psql -U postgres -d inventory -c "
-        UPDATE inventory.customers
-        SET first_name = 'Updated'
-        WHERE email = 'test@example.com';
-    "
-
-    sleep 3
-
-    docker exec streamshift-postgres-source psql -U postgres -d inventory -c "
-        DELETE FROM inventory.customers
-        WHERE email = 'test@example.com';
-    "
-
-    echo "Test changes completed! Check your app logs."
+function restart_kafka() {
+    echo "Restarting Kafka services..."
+    docker-compose restart kafka
+    sleep 10
+    docker-compose restart debezium
+    sleep 15
 }
 
 case "${1:-}" in
-    "test")
-        test_changes
+    "start")
+        echo "Starting infrastructure..."
+        docker-compose up -d
+
+        wait_for_service 2181 "Zookeeper"
+        wait_for_service 5432 "PostgreSQL Source"
+        wait_for_service 5433 "PostgreSQL Target"
+
+        # Give Kafka more time
+        sleep 20
+        wait_for_service 9092 "Kafka"
+        check_kafka_ready
+
+        wait_for_service 8083 "Debezium"
+        register_connector
+
+        echo ""
+        echo "✓ Setup complete!"
+        echo "Next: mvn spring-boot:run"
         ;;
-    "status")
-        check_status
-        ;;
-    "clean")
-        echo "Cleaning up..."
-        docker-compose down -v
+    "restart-kafka")
+        restart_kafka
         ;;
     "connector")
         register_connector
         ;;
+    "test")
+        test_changes
+        ;;
+    "status")
+        show_status
+        ;;
+    "clean")
+        echo "Cleaning up..."
+        docker-compose down -v
+        docker system prune -f
+        ;;
+    "logs")
+        service=${2:-kafka}
+        docker logs streamshift-$service
+        ;;
     *)
-        echo "Starting infrastructure..."
-        docker-compose up -d
-
-        wait_for_port 9092 "Kafka"
-        wait_for_port 5432 "PostgreSQL"
-        wait_for_port 8083 "Debezium HTTP"
-
-        wait_for_debezium
-        register_connector
-
+        echo "Usage: $0 {start|restart-kafka|connector|test|status|clean|logs}"
         echo ""
-        echo "Setup complete!"
-        echo ""
-        echo "Next steps:"
-        echo "1. Check status: ./scripts/setup-postgres.sh status"
-        echo "2. Install Maven: brew install maven"
-        echo "3. Start app: mvn spring-boot:run"
-        echo "4. Test: ./scripts/setup-postgres.sh test"
-        echo "5. Monitor: http://localhost:8080"
+        echo "Commands:"
+        echo "  start         - Start all services"
+        echo "  restart-kafka - Restart Kafka and Debezium"
+        echo "  connector     - Register Debezium connector"
+        echo "  test          - Insert test data"
+        echo "  status        - Show system status"
+        echo "  clean         - Stop and remove everything"
+        echo "  logs [service] - Show logs (default: kafka)"
         ;;
 esac
