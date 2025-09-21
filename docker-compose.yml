@@ -1,5 +1,17 @@
 services:
-  # Simplified Kafka - no volume issues
+  # Zookeeper for Kafka
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    hostname: zookeeper
+    container_name: streamshift-zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    restart: unless-stopped
+
+  # Simplified Kafka configuration
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     hostname: kafka
@@ -21,29 +33,6 @@ services:
     depends_on:
       - zookeeper
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 || exit 1"]
-      interval: 10s
-      timeout: 10s
-      retries: 10
-      start_period: 30s
-
-  # Zookeeper for Kafka
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.5.0
-    hostname: zookeeper
-    container_name: streamshift-zookeeper
-    ports:
-      - "2181:2181"
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "2181"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   # Source PostgreSQL Database
   postgres-source:
@@ -64,16 +53,9 @@ services:
       - "max_replication_slots=4"
       - "-c"
       - "max_wal_senders=4"
-      - "-c"
-      - "shared_preload_libraries=pgoutput"
     volumes:
       - postgres_source_data:/var/lib/postgresql/data
       - ./scripts/postgres-source-init.sql:/docker-entrypoint-initdb.d/init.sql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d inventory"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   # Target PostgreSQL Database
   postgres-target:
@@ -88,13 +70,8 @@ services:
       POSTGRES_PASSWORD: postgres
     volumes:
       - postgres_target_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d inventory_target"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
-  # Debezium Connect
+  # Debezium Connect - simplified startup
   debezium:
     image: debezium/connect:2.4
     hostname: debezium
@@ -115,31 +92,9 @@ services:
       CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: false
       CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: false
     depends_on:
-      kafka:
-        condition: service_healthy
-      postgres-source:
-        condition: service_healthy
+      - kafka
+      - postgres-source
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8083/connectors"]
-      interval: 30s
-      timeout: 10s
-      retries: 10
-      start_period: 120s
-
-  # Kafka UI
-  kafka-ui:
-    image: provectuslabs/kafka-ui:latest
-    hostname: kafka-ui
-    container_name: streamshift-kafka-ui
-    ports:
-      - "8080:8080"
-    environment:
-      KAFKA_CLUSTERS_0_NAME: local
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
-    depends_on:
-      kafka:
-        condition: service_healthy
 
 volumes:
   postgres_source_data:
