@@ -132,6 +132,9 @@ case "${1:-}" in
         wait_for_service 8083 "Debezium"
         register_connector
 
+        wait_for_service 9090 "Prometheus"
+        wait_for_service 3000 "Grafana"
+
         echo ""
         echo "✓ Setup complete!"
         echo "Next: mvn spring-boot:run"

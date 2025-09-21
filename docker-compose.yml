@@ -96,6 +96,27 @@ services:
       - postgres-source
     restart: unless-stopped
 
+  prometheus:
+    image: prom/prometheus
+    container_name: streamshift-prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+
+  grafana:
+      image: grafana/grafana
+      container_name: streamshift-grafana
+      ports:
+        - "3000:3000"
+      environment:
+        - GF_SECURITY_ADMIN_USER=admin
+        - GF_SECURITY_ADMIN_PASSWORD=admin
+      depends_on:
+        - prometheus
+
 volumes:
   postgres_source_data:
   postgres_target_data:
